@@ -320,6 +320,7 @@ PRINTF=$(command -v printf)
 SED=$(command -v sed)
 MKTEMP=$(command -v mktemp)
 FIND=$(command -v find)
+TR=$(command -v tr)
 
 # Try to find a mail client
 if [ -f /usr/bin/mailx ]; then
@@ -647,6 +648,7 @@ usage()
 # Arguments:
 #   $1 -> Server name
 #   $2 -> TCP port to connect to
+#   $3 -> Server IP
 ##########################################################################
 check_server_status() {
 
@@ -671,7 +673,7 @@ check_server_status() {
     if [ "${TLSSERVERNAME}" = "FALSE" ]; then
         OPTIONS="-connect ${1}:${2} $TLSFLAG"
     else
-        OPTIONS="-connect ${1}:${2} -servername ${1} $TLSFLAG"
+        OPTIONS="-connect ${3}:${2} -servername ${1} $TLSFLAG"
     fi
 
     echo "" | "${OPENSSL}" s_client $OPTIONS 2> "${ERROR_TMP}" 1> "${CERT_TMP}"
@@ -747,6 +749,9 @@ check_file_status() {
         ### Grab the serial number from the X.509 certificate
         SERIAL=$("${OPENSSL}" x509 -in "${CERT_TMP}" -serial -noout | \
                  "${SED}" -e 's/serial=//')
+
+        ### Extract domain name from SAN list
+        DOMAINNAME=$("${OPENSSL}" x509 -in "${CERT_TMP}" -noout -ext subjectAltName | "${GREP}" DNS | "${SED}" s/DNS://g | "${TR}" -d ' ' | "${TR}" , \\n | "${GREP}" -w "${HOST}")
     else
         # Extract the expiration date from the ceriticate
         CERTDATE=$("${OPENSSL}" x509 -in "${CERTFILE}" -enddate -noout -inform "${CERTTYPE}" | \
@@ -764,6 +769,9 @@ check_file_status() {
         ### Grab the serial number from the X.509 certificate
         SERIAL=$("${OPENSSL}" x509 -in "${CERTFILE}" -serial -noout -inform "${CERTTYPE}" | \
                  "${SED}" -e 's/serial=//')
+        
+        ### Extract domain name from SAN list
+        DOMAINNAME=$("${OPENSSL}" x509 -in "${CERT_TMP}" -noout -ext subjectAltName | "${GREP}" DNS | "${SED}" s/DNS://g | "${TR}" -d ' ' | "${TR}" , \\n | "${GREP}" -w "${HOST}")
     fi
 
     ### Split the result into parameters, and pass the relevant pieces to date2julian
@@ -794,6 +802,12 @@ check_file_status() {
     else
         prints "${HOST}" "${PORT}" "Valid" "${CERTDATE}" "${CERTDIFF}" "${CERTISSUER}" "${COMMONNAME}" "${SERIAL}"
         RETCODE_LOCAL=0
+    fi
+
+    if [ "${DOMAINNAME}" = "" ]; then
+        send_mail "${SENDER}" "${ADMIN}" "Certificate for ${HOST} is not valid" \
+            "The SSL certificate for ${HOST} \"(CN: ${COMMONNAME})\" does not include this domain name in it's SAN"
+        RETCODE_LOCAL=3
     fi
 
     set_returncode "${RETCODE_LOCAL}"
@@ -917,13 +931,15 @@ elif [ -f "${SERVERFILE}" ]; then
     IFS=$'\n'
     for LINE in $(grep -E -v '(^#|^$)' "${SERVERFILE}")
     do
-        HOST=${LINE%% *}
-        PORT=${LINE##* }
+        PARAMS=($LINE)
+        HOST=${PARAMS[0]}
+        PORT=${PARAMS[1]}
+        IP=${PARAMS[2]}
         IFS=" "
         if [ "$PORT" = "FILE" ]; then
             check_file_status "${HOST}" "FILE" "${HOST}"
         else
-            check_server_status "${HOST}" "${PORT}"
+            check_server_status "${HOST}" "${PORT}" "${IP}"
         fi
     done
     IFS="${OLDIFS}"
