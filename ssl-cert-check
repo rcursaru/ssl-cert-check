@@ -353,6 +353,7 @@ RETCODE=0
 SUMMARY_VALID=0
 SUMMARY_WILL_EXPIRE=0
 SUMMARY_EXPIRED=0
+SUMMARY_MISMATCH=0
 SUMMARY_MIN_DIFF=0
 SUMMARY_MIN_DATE=
 SUMMARY_MIN_HOST=
@@ -585,7 +586,7 @@ set_returncode()
 ########################################################################
 # Purpose: Set certificate counters and informations for nagios summary
 # Arguments:
-#   $1 -> Status of certificate (0: valid, 1: will expire, 2: expired)
+#   $1 -> Status of certificate (0: valid, 1: will expire, 2: expired, 3: name mismatch)
 #   $2 -> Hostname
 #   $3 -> TCP Port
 #   $4 -> Date when certificate will expire
@@ -597,8 +598,10 @@ set_summary()
         SUMMARY_VALID=$((SUMMARY_VALID+1))
     elif [ "${1}" -eq 1 ]; then
         SUMMARY_WILL_EXPIRE=$((SUMMARY_WILL_EXPIRE+1))
-    else
+    elif [ "${1}" -eq 2 ]; then
         SUMMARY_EXPIRED=$((SUMMARY_EXPIRED+1))
+    else
+        SUMMARY_MISMATCH=$((SUMMARY_MISMATCH+1))
     fi
 
     if [ "${5}" -lt "${SUMMARY_MIN_DIFF}" ] || [ "${SUMMARY_MIN_DIFF}" -eq 0 ]; then
@@ -751,7 +754,7 @@ check_file_status() {
                  "${SED}" -e 's/serial=//')
 
         ### Extract domain name from SAN list
-        DOMAINNAME=$("${OPENSSL}" x509 -in "${CERT_TMP}" -noout -ext subjectAltName | "${GREP}" DNS | "${SED}" s/DNS://g | "${TR}" -d ' ' | "${TR}" , \\n | "${GREP}" -w "${HOST}")
+        DOMAINNAME=$("${OPENSSL}" x509 -in "${CERT_TMP}" -noout -ext subjectAltName | "${GREP}" DNS | "${SED}" s/DNS://g | "${TR}" -d ' ' | "${TR}" ',' '\\n' | "${GREP}" -w "${HOST}")
     else
         # Extract the expiration date from the ceriticate
         CERTDATE=$("${OPENSSL}" x509 -in "${CERTFILE}" -enddate -noout -inform "${CERTTYPE}" | \
@@ -769,9 +772,9 @@ check_file_status() {
         ### Grab the serial number from the X.509 certificate
         SERIAL=$("${OPENSSL}" x509 -in "${CERTFILE}" -serial -noout -inform "${CERTTYPE}" | \
                  "${SED}" -e 's/serial=//')
-        
+
         ### Extract domain name from SAN list
-        DOMAINNAME=$("${OPENSSL}" x509 -in "${CERT_TMP}" -noout -ext subjectAltName | "${GREP}" DNS | "${SED}" s/DNS://g | "${TR}" -d ' ' | "${TR}" , \\n | "${GREP}" -w "${HOST}")
+        DOMAINNAME=$("${OPENSSL}" x509 -in "${CERTFILE}" -noout -ext subjectAltName | "${GREP}" DNS | "${SED}" s/DNS://g | "${TR}" -d ' ' | "${TR}" ',' '\\n' | "${GREP}" -w "${HOST}")
     fi
 
     ### Split the result into parameters, and pass the relevant pieces to date2julian
@@ -799,15 +802,15 @@ check_file_status() {
         prints "${HOST}" "${PORT}" "Expiring" "${CERTDATE}" "${CERTDIFF}" "${CERTISSUER}" "${COMMONNAME}" "${SERIAL}"
         RETCODE_LOCAL=1
 
-    else
-        prints "${HOST}" "${PORT}" "Valid" "${CERTDATE}" "${CERTDIFF}" "${CERTISSUER}" "${COMMONNAME}" "${SERIAL}"
-        RETCODE_LOCAL=0
-    fi
-
-    if [ "${DOMAINNAME}" = "" ]; then
+    elif [ "${DOMAINNAME}" = "" ]; then
+        prints "${HOST}" "${PORT}" "Mismatch" "${CERTDATE}" "${CERTDIFF}" "${CERTISSUER}" "${COMMONNAME}" "${SERIAL}"
         send_mail "${SENDER}" "${ADMIN}" "Certificate for ${HOST} is not valid" \
             "The SSL certificate for ${HOST} \"(CN: ${COMMONNAME})\" does not include this domain name in it's SAN"
         RETCODE_LOCAL=3
+
+    else
+        prints "${HOST}" "${PORT}" "Valid" "${CERTDATE}" "${CERTDIFF}" "${CERTISSUER}" "${COMMONNAME}" "${SERIAL}"
+        RETCODE_LOCAL=0
     fi
 
     set_returncode "${RETCODE_LOCAL}"
@@ -931,11 +934,11 @@ elif [ -f "${SERVERFILE}" ]; then
     IFS=$'\n'
     for LINE in $(grep -E -v '(^#|^$)' "${SERVERFILE}")
     do
-        PARAMS=($LINE)
+        IFS=" "
+        read -r -a PARAMS <<< "$LINE"
         HOST=${PARAMS[0]}
         PORT=${PARAMS[1]}
         IP=${PARAMS[2]}
-        IFS=" "
         if [ "$PORT" = "FILE" ]; then
             check_file_status "${HOST}" "FILE" "${HOST}"
         else
